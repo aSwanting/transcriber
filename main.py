@@ -72,13 +72,26 @@ def ascii_loader(stop_event):
         sys.stdout.flush()  
         time.sleep(0.1)  
 
-def transcription():
+def transcription(file_path, output_dir):
     """
     Simulates a transcription process by waiting for 5 seconds and then outputting a message.
     """
-    time.sleep(5)
-    output_path = os.getcwd() + "\\transcriptions\\"
-    sys.stdout.write(f"\rTranscription complete, files saved to {output_path}\n")
+    time.sleep(5) # Simulate processing time
+
+    # Create output path
+    file_name_without_ext = os.path.splitext(os.path.basename(file_path))[0] 
+    output_path = os.path.join(output_dir, f"{file_name_without_ext}.txt")
+
+    # Create output directory if not present
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Create mock transcription
+    with open(output_path, 'w') as file:
+        file.write(f"Transcription for {file_name_without_ext}")
+
+
+    # sys.stdout.write(f"\rTranscription complete, files saved to {output_path}\n")
 
 def main():
     """
@@ -102,7 +115,9 @@ def main():
             break
 
         # List and display supported files
-        if list_whisper_supported_files(files_path):
+        output_dir = os.getcwd() + "\\transcriptions\\" # Build the output directory path
+        supported_files = list_whisper_supported_files(files_path)
+        if supported_files:
             transcribe_input = input("Transcribe? (y/n)\n").strip().lower()
 
             if transcribe_input == 'y': 
@@ -111,13 +126,16 @@ def main():
                 loader_thread = threading.Thread(target=ascii_loader, args=(stop_event,))
                 loader_thread.start()
                 
-                transcription()  # Simulate transcription process
+                for file in supported_files:
+                    transcription(file['file_path'], output_dir)  # Simulate transcription process
+
+                sys.stdout.write(f"\rProcessing complete, transcription(s) saved to {output_dir}")
                 
                 stop_event.set()  # Stop the loader animation
                 loader_thread.join()
 
                 # Ask if the user wants to transcribe more files
-                continue_input = input("Transcribe more files? (y/n)\n").strip().lower()
+                continue_input = input("\nTranscribe more files? (y/n)\n").strip().lower()
                 if continue_input != 'y': 
                     sys.stdout.write("\rExiting application...\n")
                     break
