@@ -74,7 +74,7 @@ def ascii_loader(stop_event):
 
 def transcription(file_path, output_dir):
     """
-    Simulates a transcription process by waiting for 5 seconds and then outputting a message.
+    Simulates a transcription process by waiting for 5 seconds and generating mock transcriptions.
     """
     time.sleep(5) # Simulate processing time
 
