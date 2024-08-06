@@ -1,0 +1,19 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Virtual environment
+venv/
+env/
+
+# Packaging specifications
+*.spec
+
+# IDE and editor settings
+.vscode/
+.idea/
+
+# Logs and temporary files
+*.log
+*.tmp
