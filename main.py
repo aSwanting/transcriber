@@ -17,30 +17,23 @@ def list_whisper_supported_files(files_path):
 
             for file in files:
                 file_extension = os.path.splitext(file)[1].lower()
+                file_size = os.path.getsize(file)/(1024 * 1024)
 
-                if file_extension in supported_extensions :
-                    file_size = os.path.getsize(file)/(1024 * 1024)
+                if file_extension in supported_extensions and file_size < 25 :
                     supported_files.append({
                         'file_path': file,
                         'file_size': file_size
                     })
         except Exception:
-            sys.stdout.write(f"\nPath error: Not a file or a folder.\n")
+            sys.stdout.write(f"Path error: Not a file or a folder.\n")
             return
 
         if supported_files:
             sys.stdout.write("\nSupported file(s) found:\n")
-
-            # for i, file in enumerate(supported_files,start = 1):
-            #     sys.stdout.write(f"{i}. {file["file_path"]} ({file["file_size"]:.2f} MB)\n")
-
-
             sys.stdout.write(f"\n{'No.':<5} {'File Path':<60} {'Size (MB)':>10}\n")
             sys.stdout.write('-' * 80 + '\n')
             for i, file in enumerate(supported_files, start=1):
                 sys.stdout.write(f"{i:<5} {os.path.basename(file['file_path']):<60} {file['file_size']:>10.2f}\n")
-   
-
         else:
             sys.stdout.write("No supported files found")
         
