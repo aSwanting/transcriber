@@ -18,3 +18,4 @@ env/
 *.log
 *.tmp
 transcriptions/
+config.ini
