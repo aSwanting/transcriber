@@ -5,6 +5,7 @@ import threading
 import time
 import configparser
 
+
 def load_api_key():
     """
     Loads the API key from a configuration file. If the configuration file does not exist or does not contain
@@ -83,7 +84,7 @@ def list_whisper_supported_files(files_path):
             file_extension = os.path.splitext(file)[1].lower()
             file_size = os.path.getsize(file) / (1024 * 1024)
 
-            if file_extension in supported_extensions and file_size < 25:
+            if file_extension in supported_extensions:
                 supported_files.append({
                     'file_path': file,
                     'file_size': file_size
@@ -105,8 +106,7 @@ def list_whisper_supported_files(files_path):
     sys.stdout.write("\n")
     return supported_files
 
-
-def ascii_loader(stop_event):
+def ascii_loader(stop_event, file_name_without_ext):
     """
     Displays an ASCII spinner animation until the stop event is set.
 
@@ -117,46 +117,79 @@ def ascii_loader(stop_event):
         '|.....', '.|....', '..|...', '...|..', '....|.',
         '.....|', '....|.', '...|..', '..|...', '.|....'
     ])
-    sys.stdout.write('\n')  
-    
+
+    # Hide cursor
+    sys.stdout.write('\033[?25l')
+
+    # Animate loader
     while not stop_event.is_set():
-        sys.stdout.write(f"\r {next(loader)} ")  
+        sys.stdout.write(f"\r{file_name_without_ext} {next(loader)}")  
         sys.stdout.flush()  
         time.sleep(0.1)  
 
+    # Show cursor
+    sys.stdout.write('\033[?25h')
 
-def transcription(file_path, output_dir):
+def transcription(file, output_dir):
     """
     Simulates a transcription process by creating a placeholder transcription file in the output directory.
 
     Parameters:
-    file_path (str): The path to the file being transcribed.
+    file (obj): File object containing path and size
     output_dir (str): The directory where the transcription output file will be saved.
     """
-    time.sleep(5)
 
-    file_name_without_ext = os.path.splitext(os.path.basename(file_path))[0]
+    file_path = file['file_path']
+    file_size = file['file_size']
+    file_name = os.path.basename(file_path)
+    file_name_without_ext = os.path.splitext(file_name)[0]
     output_path = os.path.join(output_dir, f"{file_name_without_ext}.txt")
+    spacing = 80 - len(file_name_without_ext)
 
     # Create output directory if it does not exist
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
+    # Check file size and ask if user wants to reduce/split
+    if file_size > 25:
+        sys.stdout.write(f"\r{file_name_without_ext} is larger than 25 MB, split? (y/n)\n")
+        cont = input().strip().lower()
+        sys.stdout.write("\033[F\033[K")
+        sys.stdout.flush()
+        if not cont == 'y':
+            spacing -= 3
+            sys.stdout.write(f"\033[F\033[K{file_name_without_ext} {'.' * spacing}[SKIPPED]\n")
+            return False
+        sys.stdout.write("\033[F\033[K")
+
+    # Start the ASCII loader animation in a separate thread
+    stop_event = threading.Event()
+    loader_thread = threading.Thread(target=ascii_loader, args=(stop_event, file_name_without_ext))
+    loader_thread.start()
+
+    # Simulate transcription time
+    time.sleep(2)
+
+    # Stop the ASCII loader animation
+    stop_event.set()
+    loader_thread.join()
+
     # Write a placeholder transcription to the output file
     with open(output_path, 'w') as file:
         file.write(f"Transcription for {file_name_without_ext}")
 
-
+    sys.stdout.write(f"\r\033[2K{file_name_without_ext} {'.' * spacing}[DONE]\n")
+    return True
+ 
+    
 def main():
     """
     Main function that handles user interaction, file processing, and transcription operations.
     """
     # Print application banner
-    sys.stdout.write("\n||||||||||||||||||||||||||||||||||||||                          ||||||||||||||||||||||||||||||||||||||||||")
-    sys.stdout.write("\n|||||||||||||||||||||||||||||||||||||||                          |||||||||||||||||||||||||||||||||||||||||")
-    sys.stdout.write("\n||||||||||||||||||||||||||||||||||||||||     TRANSCRIBER 3000     ||||||||||||||||||||||||||||||||||||||||")
-    sys.stdout.write("\n|||||||||||||||||||||||||||||||||||||||||                          |||||||||||||||||||||||||||||||||||||||")
-    sys.stdout.write("\n||||||||||||||||||||||||||||||||||||||||||                          ||||||||||||||||||||||||||||||||||||||\n")
+    sys.stdout.write('\n' + '=' * 50 + '\n')
+    sys.stdout.write('TRANSCRIBER 3000')
+    sys.stdout.write('\n' + '=' * 50 + '\n')
 
     # Load or prompt for API key
     load_api_key()
@@ -172,35 +205,34 @@ def main():
         # Define output directory for transcriptions
         output_dir = os.path.join(os.getcwd(), "transcriptions" )
         supported_files = list_whisper_supported_files(files_path)
+        file_count = len(supported_files)
         
         if supported_files:
             # Ask user if they want to transcribe the supported files
-            transcribe_input = input("Transcribe? (y/n)\n").strip().lower()
+            transcribe_input = input(f"Transcribe {file_count} file(s)? (y/n)\n").strip().lower()
 
             if transcribe_input == 'y': 
-                # Start the ASCII loader animation in a separate thread
-                stop_event = threading.Event()
-                loader_thread = threading.Thread(target=ascii_loader, args=(stop_event,))
-                loader_thread.start()
-                
+                sys.stdout.write("\033[FTranscribing...\n\n")
+
                 # Process each supported file for transcription
+                counter = 0
                 for file in supported_files:
-                    transcription(file['file_path'], output_dir)
 
-                sys.stdout.write(f"\rProcessing complete, transcription(s) saved to {output_dir}")
+                    if transcription(file, output_dir):
+                        counter += 1
+
+                sys.stdout.write(f"\nProcessing complete, {counter} transcription(s) saved to {output_dir}")
                 
-                # Stop the ASCII loader animation
-                stop_event.set()
-                loader_thread.join()
-
                 # Ask user if they want to continue
                 continue_input = input("\nTranscribe more files? (y/n)\n").strip().lower()
                 if continue_input != 'y': 
-                    sys.stdout.write("\rExiting application...\n")
+                    sys.stdout.write("\033[FExiting application...\n")
                     break
 
+                sys.stdout.write("\033[F \n")
+
             else:
-                sys.stdout.write("\rTranscription cancelled\n")
+                sys.stdout.write("\033[FTranscription cancelled\n")
 
 if __name__ == "__main__":
     main()
