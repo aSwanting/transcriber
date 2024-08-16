@@ -18,4 +18,5 @@ env/
 *.log
 *.tmp
 transcriptions/
+reduced_files/
 config.ini

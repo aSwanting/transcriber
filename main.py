@@ -8,6 +8,30 @@ import configparser
 import subprocess
 import static_ffmpeg
 
+def ascii_loader(stop_event, file_name_without_ext):
+    """
+    Displays an ASCII spinner animation until the stop event is set.
+
+    Parameters:
+    stop_event (threading.Event): An event used to signal when to stop the animation.
+    """
+    loader = itertools.cycle([
+        '|.....', '.|....', '..|...', '...|..', '....|.',
+        '.....|', '....|.', '...|..', '..|...', '.|....'
+    ])
+
+    # Hide cursor
+    sys.stdout.write('\033[?25l')
+
+    # Animate loader
+    while not stop_event.is_set():
+        sys.stdout.write(f"\r{file_name_without_ext} {next(loader)}")  
+        sys.stdout.flush()  
+        time.sleep(0.1)  
+
+    # Show cursor
+    sys.stdout.write('\033[?25h')
+
 def load_api_key():
     """
     Loads the API key from a configuration file. If the configuration file does not exist or does not contain
@@ -96,53 +120,133 @@ def list_whisper_supported_files(files_path):
         return
 
     # Display the supported files and their details
-    if supported_files:
+    if len(supported_files) > 1:
         sys.stdout.write("\nSupported file(s) found:\n")
         sys.stdout.write(f"\n{'No.':<5} {'File Path':<60} {'Size (MB)':>10}\n")
         sys.stdout.write('-' * 80 + '\n')
         for i, file in enumerate(supported_files, start=1):
             sys.stdout.write(f"{i:<5} {os.path.basename(file['file_path']):<60} {file['file_size']:>10.2f}\n")
-    else:
+    elif not supported_files:
         sys.stdout.write("No supported files found")
     
     sys.stdout.write("\n")
     return supported_files
 
-def ascii_loader(stop_event, file_name_without_ext):
+def prepare_file_for_transcription(file_path):
     """
-    Displays an ASCII spinner animation until the stop event is set.
-
+    Prepares a file for transcription by reducing its size if necessary and chunking it if it's too large.
+    
     Parameters:
-    stop_event (threading.Event): An event used to signal when to stop the animation.
+    file_path (str): The path to the original file.
+    output_dir (str): The directory where the output files will be saved.
+
+    Returns:
+    list: A list of file paths that are ready for transcription.
     """
-    loader = itertools.cycle([
-        '|.....', '.|....', '..|...', '...|..', '....|.',
-        '.....|', '....|.', '...|..', '..|...', '.|....'
-    ])
+    
+    file_name = os.path.basename(file_path)
+    file_name_clean = os.path.splitext(file_name)[0]
 
-    # Hide cursor
-    sys.stdout.write('\033[?25l')
+    # Create the output directory for reduced files, to be deleted after operation is completed
+    output_dir = os.path.join(os.getcwd(), "reduced_files")
+    os.makedirs(output_dir, exist_ok=True)
 
-    # Animate loader
-    while not stop_event.is_set():
-        sys.stdout.write(f"\r{file_name_without_ext} {next(loader)}")  
-        sys.stdout.flush()  
-        time.sleep(0.1)  
+    # Reduce the file size 
+    reduced_file_path, reduced_file_size, duration = reduce_file(file_path, file_name_clean, output_dir)
 
-    # Show cursor
-    sys.stdout.write('\033[?25h')
+    # If the reduced file is still too large, chunk it
+    if reduced_file_size > 25:
+        # Chunk the file and return a list of chunk paths
+        chunk_file_paths = chunk_file(reduced_file_path, file_name_clean, reduced_file_size, duration, output_dir)
+        return chunk_file_paths
+    else:
+        # Return a list with the single reduced file path
+        return [reduced_file_path]
 
-def transcription(file, output_dir):
+
+def reduce_file(file_path, file_name_clean, output_dir):
+    """
+    Reduce the size of the audio file by converting it to OGG format.
+
+    Args:
+        file_path (str): Path to the input audio file.
+
+    Returns:
+        tuple: A tuple containing the path to the reduced file, its size, and duration.
+    """
+
+    output_path = os.path.join(output_dir, file_name_clean + ".ogg")
+
+    # Convert the file to ogg using ffmpeg
+    sys.stdout.write("Converting to ogg...\n")
+    sys.stdout.flush()
+    command_ffmpeg = ['static_ffmpeg', '-v', 'quiet', '-stats', '-y', '-i', file_path, output_path]
+    subprocess.run(command_ffmpeg, check=True)  # Run the command and ensure it completes successfully
+
+    # Get new file size
+    sys.stdout.flush()
+    reduced_file_size = os.path.getsize(output_path) / (1024 * 1024)  # Convert size to MB
+
+    # Get the duration of the reduced file using ffprobe
+    command_ffprobe = [
+        'static_ffprobe', '-v', 'quiet',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        output_path
+    ]
+    result = subprocess.run(command_ffprobe, capture_output=True, text=True)
+    duration = float(result.stdout.strip())
+
+    return output_path, reduced_file_size, duration
+
+
+def chunk_file(reduced_file_path, file_name_clean, reduced_file_size, duration, output_dir):
+    """
+    Splits the reduced file into chunks of approximately equal duration.
+    
+    Parameters:
+    reduced_file_path (str): The path to the reduced file.
+    reduced_file_size (float): The size of the reduced file in MB.
+    duration (float): The duration of the reduced file in seconds.
+    output_dir (str): The directory where the chunks will be saved.
+
+    Returns:
+    list: A list of file paths for the chunks.
+    """
+    chunk_output_dir = os.path.join(output_dir, file_name_clean)
+    chunk_count = math.ceil(reduced_file_size / 25)
+    chunk_duration = round(duration / chunk_count, 2)
+    sys.stdout.write(f"\nFile size over 25MB ({reduced_file_size:.2f} MB), splitting into {chunk_count} {chunk_duration} second chunks...\n")
+
+    # Create chunk directory using file name
+    os.makedirs(chunk_output_dir, exist_ok=True)
+
+    # Split the file into chunks using ffmpeg
+    command_ffmpeg_split = [
+        'static_ffmpeg', '-v', 'quiet', '-stats', 
+        '-y', '-i', reduced_file_path,
+        '-f', 'segment',
+        '-segment_time', str(chunk_duration),
+        '-c', 'copy',
+        os.path.join(chunk_output_dir, file_name_clean + '-chunk_%03d.ogg')
+    ]
+    subprocess.run(command_ffmpeg_split, check=True)
+    sys.stdout.write("File successfully split into chunks.\n\n")
+
+    # Return list of chunk files
+    chunk_files = [os.path.join(chunk_output_dir, file) for file in os.listdir(chunk_output_dir)]
+    return chunk_files
+
+
+def transcription(file_path, output_dir):
     """
     Simulates a transcription process by creating a placeholder transcription file in the output directory.
 
     Parameters:
-    file (obj): File object containing path and size
+    file_path (str): Path to the input audio file.
     output_dir (str): The directory where the transcription output file will be saved.
     """
 
-    file_path = file['file_path']
-    file_size = file['file_size']
     file_name = os.path.basename(file_path)
     file_name_without_ext = os.path.splitext(file_name)[0]
     output_path = os.path.join(output_dir, f"{file_name_without_ext}.txt")
@@ -152,26 +256,12 @@ def transcription(file, output_dir):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Check file size and ask if user wants to reduce/split
-    if file_size > 25:
-        split_confirmation = input(f"\r{file_name_without_ext} is larger than 25 MB, split? (y/n)\n").strip().lower()
-        sys.stdout.write("\033[F\033[K")
-        sys.stdout.flush()
-        
-        if not split_confirmation == 'y':
-            spacing -= 3
-            sys.stdout.write(f"\033[F\033[K{file_name_without_ext}{'.' * spacing}[SKIPPED]\n")
-            return False
-        sys.stdout.write("\033[F\033[K")
-
-        reduce_file(file_path)
-
     # Start the ASCII loader animation in a separate thread
     stop_event = threading.Event()
     loader_thread = threading.Thread(target=ascii_loader, args=(stop_event, file_name_without_ext))
     loader_thread.start()
 
-    # Simulate transcription time
+    # Simulate transcription time, this will be replaced by OpenAI Whisper Speech-to-Text
     time.sleep(2)
 
     # Stop the ASCII loader animation
@@ -184,22 +274,6 @@ def transcription(file, output_dir):
     sys.stdout.write(f"\r\033[2K{file_name_without_ext}{'.' * spacing}[DONE]\n")
     return True
  
-def reduce_file(file_path):
-    """
-    Reduce file size, chunk if necessary.
-    """      
-    # subprocess.run([
-    #     static_ffmpeg, '-i', file_path, '-acodec', 'libvorbis', '-qscale:a', '5', 'output_ogg'
-    #     ], check=True)
-
-    # os.system(f"static_ffmpeg -i {file_path} test.ogg")
-    file_path = "test.ogg"
-    file_size = os.path.getsize(file_path) / (1024 * 1024)
-    sys.stdout.write(f"new size: {file_size}\n")
-    
-    # subprocess.run([
-    #     'static_ffmpeg', '-i', file_path, 'test.ogg'
-    # ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def main():
     """
@@ -231,16 +305,38 @@ def main():
             transcribe_input = input(f"Transcribe {file_count} file(s)? (y/n)\n").strip().lower()
 
             if transcribe_input == 'y': 
-                sys.stdout.write("\033[FTranscribing...\n\n")
+                sys.stdout.write("\033[FProcessing...\n\n")
 
-                # Process each supported file for transcription
-                counter = 0
+                # List to keep track of all files to be transcribed
+                files_to_transcribe = []
+
+                # Process each supported file
                 for file in supported_files:
+                    file_path = file['file_path']
+                    file_size = file['file_size']
+                    
+                    if file_size > 25:
+                        # Prepare large files for transcription (reduce and chunk if needed)
+                        reduce_input = input(f"Audio file is larger than 25 MB, reduce and split if necessary? Original file will not be modified. (y/n)\n").strip().lower()
+                        if reduce_input == 'y':
+                            sys.stdout.write("\033[FReducing...\n\n")
+                            files_to_transcribe.extend(prepare_file_for_transcription(file_path))
+                        else:
+                            sys.stdout.write("\033[FSkipping...\n\n")
+                    else:
+                        # Add files that do not exceed the size limit
+                        files_to_transcribe.append(file_path)
+                
+                # Transcribe all files, to be added
+                if files_to_transcribe:
+                    sys.stdout.write("Transcribing...\n\n")
+                    counter = 0
 
-                    if transcription(file, output_dir):
+                    for file_path in files_to_transcribe:
+                        transcription(file_path, output_dir)
                         counter += 1
-
-                sys.stdout.write(f"\nProcessing complete, {counter} transcription(s) saved to {output_dir}")
+            
+                    sys.stdout.write(f"\nProcessing complete, {counter} transcription(s) saved to {output_dir}")
                 
                 # Ask user if they want to continue
                 continue_input = input("\nTranscribe more files? (y/n)\n").strip().lower()
