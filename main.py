@@ -1,10 +1,12 @@
 import os
 import sys
+import math
+import time
 import itertools
 import threading
-import time
 import configparser
-
+import subprocess
+import static_ffmpeg
 
 def load_api_key():
     """
@@ -144,7 +146,7 @@ def transcription(file, output_dir):
     file_name = os.path.basename(file_path)
     file_name_without_ext = os.path.splitext(file_name)[0]
     output_path = os.path.join(output_dir, f"{file_name_without_ext}.txt")
-    spacing = 80 - len(file_name_without_ext)
+    spacing = 72 - len(file_name_without_ext)
 
     # Create output directory if it does not exist
     if not os.path.exists(output_dir):
@@ -152,15 +154,17 @@ def transcription(file, output_dir):
 
     # Check file size and ask if user wants to reduce/split
     if file_size > 25:
-        sys.stdout.write(f"\r{file_name_without_ext} is larger than 25 MB, split? (y/n)\n")
-        cont = input().strip().lower()
+        split_confirmation = input(f"\r{file_name_without_ext} is larger than 25 MB, split? (y/n)\n").strip().lower()
         sys.stdout.write("\033[F\033[K")
         sys.stdout.flush()
-        if not cont == 'y':
+        
+        if not split_confirmation == 'y':
             spacing -= 3
-            sys.stdout.write(f"\033[F\033[K{file_name_without_ext} {'.' * spacing}[SKIPPED]\n")
+            sys.stdout.write(f"\033[F\033[K{file_name_without_ext}{'.' * spacing}[SKIPPED]\n")
             return False
         sys.stdout.write("\033[F\033[K")
+
+        reduce_file(file_path)
 
     # Start the ASCII loader animation in a separate thread
     stop_event = threading.Event()
@@ -177,11 +181,26 @@ def transcription(file, output_dir):
     # Write a placeholder transcription to the output file
     with open(output_path, 'w') as file:
         file.write(f"Transcription for {file_name_without_ext}")
-
-    sys.stdout.write(f"\r\033[2K{file_name_without_ext} {'.' * spacing}[DONE]\n")
+    sys.stdout.write(f"\r\033[2K{file_name_without_ext}{'.' * spacing}[DONE]\n")
     return True
  
+def reduce_file(file_path):
+    """
+    Reduce file size, chunk if necessary.
+    """      
+    # subprocess.run([
+    #     static_ffmpeg, '-i', file_path, '-acodec', 'libvorbis', '-qscale:a', '5', 'output_ogg'
+    #     ], check=True)
+
+    # os.system(f"static_ffmpeg -i {file_path} test.ogg")
+    file_path = "test.ogg"
+    file_size = os.path.getsize(file_path) / (1024 * 1024)
+    sys.stdout.write(f"new size: {file_size}\n")
     
+    # subprocess.run([
+    #     'static_ffmpeg', '-i', file_path, 'test.ogg'
+    # ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 def main():
     """
     Main function that handles user interaction, file processing, and transcription operations.
