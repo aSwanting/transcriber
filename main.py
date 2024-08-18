@@ -8,6 +8,8 @@ import sys
 import threading
 import time
 
+import openai
+
 
 def ascii_loader(stop_event, file_name_without_ext):
     """
@@ -72,6 +74,8 @@ def load_api_key():
     if not key_value:
         save_api_key(config, config_path)
         key_value = config["API_KEY"].get("key")
+
+    return key_value
 
 
 def save_api_key(config, config_path):
@@ -184,7 +188,7 @@ def reduce_file(file_path, file_name_clean, output_dir):
     """
     Reduce the size of the audio file by converting it to OGG format.
 
-    Args:
+    Parameters:
         file_path (str): Path to the input audio file.
 
     Returns:
@@ -229,7 +233,12 @@ def reduce_file(file_path, file_name_clean, output_dir):
     )  # Convert size to MB
 
     # Get the duration of the reduced file using ffprobe
-    sys.stdout.flush()
+    duration = get_duration(output_path)
+
+    return output_path, reduced_file_size, duration
+
+
+def get_duration(file_path):
     command_ffprobe = [
         "static_ffprobe",
         "-v",
@@ -238,12 +247,12 @@ def reduce_file(file_path, file_name_clean, output_dir):
         "format=duration",
         "-of",
         "default=noprint_wrappers=1:nokey=1",
-        output_path,
+        file_path,
     ]
     result = subprocess.run(command_ffprobe, capture_output=True, text=True)
     duration = float(result.stdout.strip())
 
-    return output_path, reduced_file_size, duration
+    return duration
 
 
 def chunk_file(
@@ -288,7 +297,6 @@ def chunk_file(
         "copy",
         os.path.join(chunk_output_dir, file_name_clean + "-chunk_%03d.ogg"),
     ]
-    # subprocess.run(command_ffmpeg_split, check=True)
 
     # Start ffmpeg chunking in subprocess
     process = subprocess.Popen(
@@ -310,6 +318,7 @@ def chunk_file(
     chunk_files = [
         os.path.join(chunk_output_dir, file) for file in os.listdir(chunk_output_dir)
     ]
+
     return chunk_files
 
 
@@ -321,13 +330,43 @@ def transcription(file_path, output_dir):
     file_path (str): Path to the input audio file.
     output_dir (str): The directory where the transcription output file will be saved.
     """
-
+    # Extract the file name and base name (without extension) from the file path
     file_name = os.path.basename(file_path)
     file_name_without_ext = os.path.splitext(file_name)[0]
-    output_path = os.path.join(output_dir, f"{file_name_without_ext}.txt")
+
+    # Initialize variables to track the last transcription segment details
+    last_id = 0
+    last_timestamp_seconds = 0
+    last_text = ""
+
+    # Check if the file is a chunk file
+    if "-chunk_" in file_name:
+        # Extract the base name for chunk files
+        base_name = file_name_without_ext.split("-chunk_")[0]
+        is_chunk = True
+    else:
+        base_name = file_name_without_ext
+        is_chunk = False
+
+    # Define the path for the transcription output file
+    output_path = os.path.join(output_dir, f"{base_name}.txt")
+
+    # Calculate spacing for output status display
     spacing = 72 - len(file_name_without_ext)
 
-    # Create output directory if it does not exist
+    # If the file is a chunk and not the first chunk, read the existing transcription file
+    if is_chunk and not file_name_without_ext.endswith("0"):
+        with open(output_path, "r") as file:
+            content = file.read().rstrip()
+        lines = content.split("\n")
+
+        # Extract the last transcription segment details from the file
+        last_id = int(lines[-3].strip())
+        last_timestamp = lines[-2].rsplit("--> ")[1].strip()
+        last_timestamp_seconds = srt_time_to_seconds(last_timestamp)
+        last_text = lines[-1]
+
+    # Create the output directory if it does not already exist
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -338,25 +377,121 @@ def transcription(file_path, output_dir):
     )
     loader_thread.start()
 
-    # Simulate transcription time, this will be replaced by OpenAI Whisper Speech-to-Text
-    time.sleep(2)
+    # Send file to whisper function for transcription
+    transcription_srt = whisper(file_path, last_timestamp_seconds, last_id, last_text)
 
     # Stop the ASCII loader animation
     stop_event.set()
     loader_thread.join()
 
-    # Write a placeholder transcription to the output file
-    with open(output_path, "w") as file:
-        file.write(f"Transcription for {file_name_without_ext}")
+    # Append the transcription result to the output file or create it if it does not exist
+    with open(output_path, "a") as file:
+        file.write(transcription_srt + "\n")
+
+    # Output completion status to the console
     sys.stdout.write(f"\r\033[2K{file_name_without_ext}{'.' * spacing}[DONE]\n")
-    return True
+
+
+def whisper(file_path, last_timestamp_seconds, last_id, last_text):
+    """
+    Transcribes an audio file using the OpenAI Whisper model and formats the transcription into SRT (SubRip Subtitle) format.
+
+    Parameters:
+    file_path (str): The path to the audio file that needs to be transcribed.
+    last_timestamp_seconds (float): The timestamp in seconds of the last transcription segment from a previous chunk (if applicable).
+    last_id (int): The ID of the last transcription segment from a previous chunk (if applicable).
+    last_text (str): The text of the last transcription segment from a previous chunk (if applicable).
+
+    Returns:
+    str: The transcription formatted in SRT (SubRip Subtitle) format.
+    """
+
+    # Open the audio file in binary read mode
+    audio_file = open(file_path, "rb")
+
+    # Request transcription from OpenAI Whisper API
+    transcription_dict = openai.audio.transcriptions.create(
+        file=audio_file,
+        model="whisper-1",
+        response_format="verbose_json",
+        timestamp_granularities=["segment"],
+    ).to_dict()
+
+    # Initialize an empty list to collect SRT formatted segments
+    srt_output = []
+
+    # Iterate over each segment returned by the transcription API
+    for segment in transcription_dict["segments"]:
+        # Calculate the new ID for this segment by incrementing the segment's ID and adding the last ID
+        id = (segment["id"] + 1) + last_id
+
+        # Convert segment start and end times from seconds to SRT time format, adjusted by the last timestamp
+        start = seconds_to_srt_time(segment["start"] + last_timestamp_seconds)
+        end = seconds_to_srt_time(segment["end"] + last_timestamp_seconds)
+
+        # Get the text of the segment, ensuring it is stripped of leading and trailing whitespace
+        text = segment["text"].strip()
+
+        # Append the formatted SRT segment to the output list
+        srt_output.append(f"{id}\n{start} --> {end}\n{text}\n")
+
+    # Join all segments into a single string with double newlines separating segments
+    return "\n".join(srt_output)
+
+
+def seconds_to_srt_time(seconds):
+    """
+    Convert a time duration from seconds to SRT (SubRip Subtitle) time format.
+
+    The SRT time format is "HH:MM:SS,mmm", where HH is hours, MM is minutes, SS is seconds, and mmm is milliseconds.
+
+    Parameters:
+    seconds (float): The time duration in seconds.
+
+    Returns:
+    str: The time formatted as "HH:MM:SS,mmm".
+    """
+    # Calculate hours, minutes, seconds, and milliseconds from the total seconds
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    milliseconds = int((seconds % 1) * 1000)
+
+    # Format and return the time as an SRT timestamp
+    return f"{hours:02}:{minutes:02}:{secs:02},{milliseconds:03}"
+
+
+def srt_time_to_seconds(srt_time):
+    """
+    Convert an SRT (SubRip Subtitle) timestamp to seconds.
+
+    The SRT timestamp format is "HH:MM:SS,SSS", where HH is hours, MM is minutes, SS is seconds, and SSS is milliseconds.
+
+    Parameters:
+    srt_time (str): The SRT timestamp to convert, in the format "HH:MM:SS,SSS".
+
+    Returns:
+    float: The timestamp converted to seconds.
+    """
+    # Split the SRT timestamp into hours, minutes, seconds, and milliseconds
+    h, m, s = srt_time.split(":")
+    s, ms = s.split(",")
+
+    # Convert each component to seconds and milliseconds
+    hours = int(h)
+    minutes = int(m)
+    seconds = int(s)
+    milliseconds = int(ms)
+
+    # Calculate and return the total time in seconds
+    total_seconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000.0
+    return total_seconds
 
 
 def cleanup_reduced_files():
     """
     Removes "reduced_files" directory after transcription, if present.
     """
-
     reduced_files_dir = os.path.join(os.getcwd(), "reduced_files")
 
     if os.path.exists(reduced_files_dir):
@@ -368,6 +503,9 @@ def main():
     """
     Main function that handles user interaction, file processing, and transcription operations.
     """
+    # Prepare API key
+    api_key = load_api_key()
+    openai.api_key = api_key
 
     try:
 
@@ -465,7 +603,7 @@ def main():
         cleanup_reduced_files()  # Clean up before exiting
 
     except Exception as e:
-        sys.stdout.write(f"something broke: {e}\n")
+        sys.stdout.write(f"Something broke: {e}\n")
         sys.stdout.flush()
         cleanup_reduced_files()  # Clean up before exiting
 
