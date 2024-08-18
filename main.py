@@ -201,7 +201,7 @@ def reduce_file(file_path, file_name_clean, output_dir):
     sys.stdout.write("Converting to ogg...\n\n")
     sys.stdout.flush()
     command_ffmpeg = [
-        "static_ffmpeg",
+        "ffmpeg",
         "-v",
         "quiet",
         "-stats",
@@ -240,7 +240,7 @@ def reduce_file(file_path, file_name_clean, output_dir):
 
 def get_duration(file_path):
     command_ffprobe = [
-        "static_ffprobe",
+        "ffprobe",
         "-v",
         "quiet",
         "-show_entries",
@@ -270,11 +270,20 @@ def chunk_file(
     Returns:
     list: A list of file paths for the chunks.
     """
+    # Calculate the chunk count and chunk duration
     chunk_output_dir = os.path.join(output_dir, file_name_clean)
+
+    # Calculate how many chunks are needed
     chunk_count = math.ceil(reduced_file_size / 25)
-    chunk_duration = round(duration / chunk_count, 2)
+
+    # Adjust the chunk duration to ensure that the last chunk includes any remaining duration
+    chunk_duration = duration / chunk_count
+
+    # Slightly increase the duration of each chunk by a small fraction
+    chunk_duration = round(chunk_duration * 1.001, 2)
+
     sys.stdout.write(
-        f"\nFile size over 25MB ({reduced_file_size:.2f} MB), splitting into {chunk_count} {chunk_duration} second chunks...\n"
+        f"\nFile size over 25MB ({reduced_file_size:.2f} MB), splitting into {chunk_count} chunks of approximately {chunk_duration} seconds each...\n"
     )
 
     # Create chunk directory using file name
@@ -282,7 +291,7 @@ def chunk_file(
 
     # Split the file into chunks using ffmpeg
     command_ffmpeg_split = [
-        "static_ffmpeg",
+        "ffmpeg",
         "-v",
         "quiet",
         "-stats",
@@ -385,7 +394,7 @@ def transcription(file_path, output_dir):
     loader_thread.join()
 
     # Append the transcription result to the output file or create it if it does not exist
-    with open(output_path, "a") as file:
+    with open(output_path, "a", encoding="utf-8") as file:
         file.write(transcription_srt + "\n")
 
     # Output completion status to the console
@@ -503,10 +512,6 @@ def main():
     """
     Main function that handles user interaction, file processing, and transcription operations.
     """
-    # Prepare API key
-    api_key = load_api_key()
-    openai.api_key = api_key
-
     try:
 
         # Print application banner
@@ -515,7 +520,8 @@ def main():
         sys.stdout.write("\n" + "=" * 50 + "\n")
 
         # Load or prompt for API key
-        load_api_key()
+        api_key = load_api_key()
+        openai.api_key = api_key
 
         while True:
             # Prompt user to input a folder or file path
@@ -597,19 +603,20 @@ def main():
                 else:
                     sys.stdout.write("\033[FTranscription cancelled\n")
 
-    except KeyboardInterrupt:
-        sys.stdout.write("Operation interrupted by user.\n")
-        sys.stdout.flush()
-        cleanup_reduced_files()  # Clean up before exiting
+    # except KeyboardInterrupt:
+    #     sys.stdout.write("Operation interrupted by user.\n")
+    #     sys.stdout.flush()
 
-    except Exception as e:
-        sys.stdout.write(f"Something broke: {e}\n")
-        sys.stdout.flush()
-        cleanup_reduced_files()  # Clean up before exiting
+    # except Exception as e:
+    #     sys.stdout.write(f"Something broke: {e}\n")
+    #     sys.stdout.flush()
+    #     cleanup_reduced_files()  # Clean up before exiting
 
     finally:
         sys.stdout.write("Exiting application...\n")
         sys.stdout.flush()
+        cleanup_reduced_files()  # Clean up before exiting
+        input()
 
 
 if __name__ == "__main__":
