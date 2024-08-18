@@ -603,20 +603,18 @@ def main():
                 else:
                     sys.stdout.write("\033[FTranscription cancelled\n")
 
-    # except KeyboardInterrupt:
-    #     sys.stdout.write("Operation interrupted by user.\n")
-    #     sys.stdout.flush()
+    except KeyboardInterrupt:
+        sys.stdout.write("Operation interrupted by user.\n")
+        sys.stdout.flush()
 
-    # except Exception as e:
-    #     sys.stdout.write(f"Something broke: {e}\n")
-    #     sys.stdout.flush()
-    #     cleanup_reduced_files()  # Clean up before exiting
+    except Exception as e:
+        sys.stdout.write(f"Something broke: {e}\n")
+        sys.stdout.flush()
 
     finally:
         sys.stdout.write("Exiting application...\n")
         sys.stdout.flush()
         cleanup_reduced_files()  # Clean up before exiting
-        input()
 
 
 if __name__ == "__main__":
