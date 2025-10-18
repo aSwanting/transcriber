@@ -1,5 +1,6 @@
 import configparser
 import itertools
+import json
 import math
 import os
 import shutil
@@ -7,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import defaultdict
 
 import openai
 
@@ -146,6 +148,111 @@ def list_whisper_supported_files(files_path):
 
     sys.stdout.write("\n")
     return supported_files
+
+
+def parse_chunk_info(file_path):
+    """
+    Returns the base name and chunk index (if any) for a prepared audio file.
+    """
+    file_name = os.path.basename(file_path)
+    file_name_without_ext = os.path.splitext(file_name)[0]
+
+    if "-chunk_" in file_name_without_ext:
+        base_name, chunk_suffix = file_name_without_ext.split("-chunk_")
+        return base_name, int(chunk_suffix)
+
+    return file_name_without_ext, None
+
+
+def get_progress_path(base_name, output_dir):
+    return os.path.join(output_dir, f"{base_name}.progress.json")
+
+
+def load_transcription_progress(base_name, output_dir):
+    """
+    Loads persisted progress for a transcription base name.
+    """
+    progress_path = get_progress_path(base_name, output_dir)
+    if not os.path.exists(progress_path):
+        return {"completed_chunks": [], "finished": False}
+
+    try:
+        with open(progress_path, "r", encoding="utf-8") as progress_file:
+            data = json.load(progress_file)
+    except (json.JSONDecodeError, OSError):
+        return {"completed_chunks": [], "finished": False}
+
+    # Ensure required keys exist
+    data.setdefault("completed_chunks", [])
+    data.setdefault("finished", False)
+    return data
+
+
+def save_transcription_progress(base_name, output_dir, progress):
+    """
+    Persists progress for a transcription base name.
+    """
+    progress_path = get_progress_path(base_name, output_dir)
+    progress["completed_chunks"] = sorted(set(progress.get("completed_chunks", [])))
+    progress.setdefault("finished", False)
+    with open(progress_path, "w", encoding="utf-8") as progress_file:
+        json.dump(progress, progress_file, indent=2)
+
+
+def record_transcription_success(base_name, chunk_index, output_dir):
+    """
+    Updates the persisted progress after a successful transcription.
+    """
+    progress = load_transcription_progress(base_name, output_dir)
+    if chunk_index is None:
+        progress["finished"] = True
+    else:
+        completed = set(progress.get("completed_chunks", []))
+        completed.add(chunk_index)
+        progress["completed_chunks"] = sorted(completed)
+        progress["finished"] = False
+    save_transcription_progress(base_name, output_dir, progress)
+
+
+def mark_transcription_finished(base_name, output_dir):
+    progress = load_transcription_progress(base_name, output_dir)
+    progress["finished"] = True
+    save_transcription_progress(base_name, output_dir, progress)
+
+
+def cleanup_transcription_progress(base_name, output_dir):
+    """
+    Removes persisted progress, transcript output, and any prepared audio
+    artifacts for the given base name.
+    """
+    progress_path = get_progress_path(base_name, output_dir)
+    if os.path.exists(progress_path):
+        try:
+            os.remove(progress_path)
+        except OSError:
+            pass
+
+    transcript_path = os.path.join(output_dir, f"{base_name}.txt")
+    if os.path.exists(transcript_path):
+        try:
+            os.remove(transcript_path)
+        except OSError:
+            pass
+
+    reduced_root = os.path.join(os.getcwd(), "reduced_files")
+    chunk_dir = os.path.join(reduced_root, base_name)
+    if os.path.isdir(chunk_dir):
+        try:
+            shutil.rmtree(chunk_dir)
+        except OSError:
+            pass
+
+    reduced_file = os.path.join(reduced_root, f"{base_name}.ogg")
+    if os.path.exists(reduced_file):
+        try:
+            os.remove(reduced_file)
+        except OSError:
+            pass
 
 
 def prepare_file_for_transcription(file_path):
@@ -324,9 +431,12 @@ def chunk_file(
     sys.stdout.flush()
 
     # Return list of chunk files
-    chunk_files = [
-        os.path.join(chunk_output_dir, file) for file in os.listdir(chunk_output_dir)
-    ]
+    chunk_files = sorted(
+        [
+            os.path.join(chunk_output_dir, file)
+            for file in os.listdir(chunk_output_dir)
+        ]
+    )
 
     return chunk_files
 
@@ -349,9 +459,12 @@ def transcription(file_path, output_dir):
     last_text = ""
 
     # Check if the file is a chunk file
+    chunk_index = None
+
     if "-chunk_" in file_name:
         # Extract the base name for chunk files
-        base_name = file_name_without_ext.split("-chunk_")[0]
+        base_name, chunk_suffix = file_name_without_ext.split("-chunk_")
+        chunk_index = int(chunk_suffix)
         is_chunk = True
     else:
         base_name = file_name_without_ext
@@ -364,16 +477,21 @@ def transcription(file_path, output_dir):
     spacing = 72 - len(file_name_without_ext)
 
     # If the file is a chunk and not the first chunk, read the existing transcription file
-    if is_chunk and not file_name_without_ext.endswith("0"):
-        with open(output_path, "r") as file:
-            content = file.read().rstrip()
-        lines = content.split("\n")
+    if is_chunk and chunk_index not in (None, 0):
+        try:
+            with open(output_path, "r", encoding="utf-8") as file:
+                content = file.read().rstrip()
+        except FileNotFoundError:
+            content = ""
 
-        # Extract the last transcription segment details from the file
-        last_id = int(lines[-3].strip())
-        last_timestamp = lines[-2].rsplit("--> ")[1].strip()
-        last_timestamp_seconds = srt_time_to_seconds(last_timestamp)
-        last_text = lines[-1]
+        if content:
+            lines = content.split("\n")
+
+            # Extract the last transcription segment details from the file
+            last_id = int(lines[-3].strip())
+            last_timestamp = lines[-2].rsplit("--> ")[1].strip()
+            last_timestamp_seconds = srt_time_to_seconds(last_timestamp)
+            last_text = lines[-1]
 
     # Create the output directory if it does not already exist
     if not os.path.exists(output_dir):
@@ -387,15 +505,20 @@ def transcription(file_path, output_dir):
     loader_thread.start()
 
     # Send file to whisper function for transcription
-    transcription_srt = whisper(file_path, last_timestamp_seconds, last_id, last_text)
-
-    # Stop the ASCII loader animation
-    stop_event.set()
-    loader_thread.join()
+    try:
+        transcription_srt = whisper(
+            file_path, last_timestamp_seconds, last_id, last_text
+        )
+    finally:
+        # Ensure the loader is always stopped, even on errors
+        stop_event.set()
+        loader_thread.join()
 
     # Append the transcription result to the output file or create it if it does not exist
     with open(output_path, "a", encoding="utf-8") as file:
         file.write(transcription_srt + "\n")
+
+    record_transcription_success(base_name, chunk_index, output_dir)
 
     # Output completion status to the console
     sys.stdout.write(f"\r\033[2K{file_name_without_ext}{'.' * spacing}[DONE]\n")
@@ -416,15 +539,32 @@ def whisper(file_path, last_timestamp_seconds, last_id, last_text):
     """
 
     # Open the audio file in binary read mode
-    audio_file = open(file_path, "rb")
+    with open(file_path, "rb") as audio_file:
+        # Request transcription from OpenAI Whisper API with minimal retry/backoff
+        max_retries = 3
+        delay_seconds = 2.0
 
-    # Request transcription from OpenAI Whisper API
-    transcription_dict = openai.audio.transcriptions.create(
-        file=audio_file,
-        model="whisper-1",
-        response_format="verbose_json",
-        timestamp_granularities=["segment"],
-    ).to_dict()
+        for attempt in range(1, max_retries + 1):
+            try:
+                transcription_dict = openai.audio.transcriptions.create(
+                    file=audio_file,
+                    model="whisper-1",
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment"],
+                ).to_dict()
+                break
+            except Exception as e:
+                if attempt == max_retries:
+                    # Re-raise after last attempt; caller prints the error
+                    raise
+                sys.stdout.write(
+                    f"\nConnection error contacting OpenAI (attempt {attempt}/{max_retries}): {e}\n"
+                    f"Retrying in {int(delay_seconds)}s...\n"
+                )
+                sys.stdout.flush()
+                time.sleep(delay_seconds)
+                delay_seconds *= 2
+                audio_file.seek(0)
 
     # Initialize an empty list to collect SRT formatted segments
     srt_output = []
@@ -512,6 +652,7 @@ def main():
     """
     Main function that handles user interaction, file processing, and transcription operations.
     """
+    cleanup_on_exit = True
     try:
 
         # Print application banner
@@ -547,6 +688,69 @@ def main():
                 if transcribe_input == "y":
                     sys.stdout.write("\033[FProcessing...\n\n")
 
+                    skip_bases = set()
+                    prompted_bases = set()
+
+                    for file in supported_files:
+                        base_name = os.path.splitext(os.path.basename(file["file_path"]))[0]
+
+                        if base_name in prompted_bases:
+                            continue
+
+                        progress_path = get_progress_path(base_name, output_dir)
+                        if not os.path.exists(progress_path):
+                            continue
+
+                        progress = load_transcription_progress(base_name, output_dir)
+                        if progress.get("finished"):
+                            continue
+
+                        completed_chunks = progress.get("completed_chunks", [])
+
+                        sys.stdout.write(f"\nFound unfinished transcription for {base_name}.\n")
+                        if completed_chunks:
+                            chunks_text = ", ".join(f"{idx:03d}" for idx in completed_chunks)
+                            sys.stdout.write(f"Completed chunks recorded so far: {chunks_text}.\n")
+                        else:
+                            sys.stdout.write(
+                                "No completed chunks recorded yet, but partial progress exists.\n"
+                            )
+
+                        transcript_path = os.path.join(output_dir, f"{base_name}.txt")
+                        if os.path.exists(transcript_path):
+                            sys.stdout.write(
+                                f"Partial transcript located at {transcript_path}.\n"
+                            )
+
+                        sys.stdout.write(
+                            "Resume now (r), discard progress and start fresh (d), or skip for now (s)? [r]\n"
+                        )
+                        sys.stdout.flush()
+
+                        while True:
+                            choice = input().strip().lower()
+                            if not choice:
+                                choice = "r"
+                            if choice in {"r", "d", "s"}:
+                                break
+                            sys.stdout.write("Please enter r, d, or s.\n")
+                            sys.stdout.flush()
+
+                        if choice == "d":
+                            cleanup_transcription_progress(base_name, output_dir)
+                            sys.stdout.write(
+                                f"{base_name} progress removed. Starting fresh.\n"
+                            )
+                            sys.stdout.flush()
+                        elif choice == "s":
+                            skip_bases.add(base_name)
+                            sys.stdout.write(
+                                f"{base_name} skipped for now. Resume later from the same file.\n"
+                            )
+                            sys.stdout.flush()
+
+                        prompted_bases.add(base_name)
+
                     # List to keep track of all files to be transcribed
                     files_to_transcribe = []
 
@@ -554,6 +758,10 @@ def main():
                     for file in supported_files:
                         file_path = file["file_path"]
                         file_size = file["file_size"]
+                        base_name = os.path.splitext(os.path.basename(file_path))[0]
+
+                        if base_name in skip_bases:
+                            continue
 
                         if file_size > 25:
                             # Prepare large files for transcription (reduce and chunk if needed)
@@ -575,21 +783,133 @@ def main():
                             # Add files that do not exceed the size limit
                             files_to_transcribe.append(file_path)
 
-                    # Transcribe all files, to be added
+                    # Transcribe all files with resume support
                     if files_to_transcribe:
                         sys.stdout.write("Transcribing...\n\n")
                         counter = 0
 
+                        failed_transcriptions = []
+                        progress_cache = {}
+                        encountered_chunks = defaultdict(set)
+                        aborted_bases = set()
+                        failed_bases = set()
+
                         for file_path in files_to_transcribe:
-                            transcription(file_path, output_dir)
-                            counter += 1
+                            base_name, chunk_index = parse_chunk_info(file_path)
+                            progress = progress_cache.get(base_name)
+                            if progress is None:
+                                progress = load_transcription_progress(base_name, output_dir)
+                                progress_cache[base_name] = progress
 
-                        sys.stdout.write(
-                            f"\nProcessing complete, {counter} transcription(s) saved to {output_dir}"
-                        )
+                            if base_name in aborted_bases:
+                                continue
 
-                    # Clean up the temporary reduced files after transcription
-                    cleanup_reduced_files()
+                            if chunk_index is not None:
+                                encountered_chunks[base_name].add(chunk_index)
+
+                                if progress.get("finished"):
+                                    sys.stdout.write(
+                                        f"\n{base_name} already fully transcribed. Skipping remaining chunks.\n"
+                                    )
+                                    sys.stdout.flush()
+                                    aborted_bases.add(base_name)
+                                    continue
+
+                                if chunk_index in progress.get("completed_chunks", []):
+                                    sys.stdout.write(
+                                        f"\n{base_name}-chunk_{chunk_index:03d} already completed earlier. Skipping...\n"
+                                    )
+                                    sys.stdout.flush()
+                                    continue
+                            else:
+                                if progress.get("finished"):
+                                    sys.stdout.write(
+                                        f"\n{base_name} already transcribed. Remove {base_name}.txt if you need to rerun.\n"
+                                    )
+                                    sys.stdout.flush()
+                                    continue
+
+                            try:
+                                transcription(file_path, output_dir)
+                                counter += 1
+                                progress_cache[base_name] = load_transcription_progress(
+                                    base_name, output_dir
+                                )
+                            except Exception as e:
+                                failed_name = os.path.basename(file_path)
+                                sys.stdout.write(
+                                    f"\n{failed_name} interrupted: {e}\n"
+                                    "Progress so far is saved. You can retry this chunk later.\n"
+                                )
+                                sys.stdout.flush()
+                                failed_transcriptions.append(
+                                    {
+                                        "display": failed_name,
+                                        "base_name": base_name,
+                                        "chunk_index": chunk_index,
+                                    }
+                                )
+                                aborted_bases.add(base_name)
+                                failed_bases.add(base_name)
+
+                        if counter:
+                            sys.stdout.write(
+                                f"\nProcessing complete, {counter} transcription(s) saved to {output_dir}"
+                            )
+                            sys.stdout.flush()
+
+                        # Mark completed chunked files
+                        for base_name, chunks in encountered_chunks.items():
+                            if base_name in failed_bases:
+                                continue
+                            progress = progress_cache.get(base_name) or load_transcription_progress(
+                                base_name, output_dir
+                            )
+                            completed = set(progress.get("completed_chunks", []))
+                            if chunks and chunks.issubset(completed) and not progress.get("finished"):
+                                mark_transcription_finished(base_name, output_dir)
+                                progress_cache[base_name] = load_transcription_progress(
+                                    base_name, output_dir
+                                )
+
+                        keep_chunks_for_retry = False
+
+                        if failed_transcriptions:
+                            sys.stdout.write("\nFiles that need a retry:\n")
+                            for entry in failed_transcriptions:
+                                label = entry["display"]
+                                if entry["chunk_index"] is not None:
+                                    label += f" (chunk {entry['chunk_index']:03d})"
+                                sys.stdout.write(f"- {label}\n")
+                            sys.stdout.write(
+                                "These likely failed due to temporary OpenAI connectivity issues.\n"
+                            )
+                            sys.stdout.flush()
+
+                            if any(
+                                item["chunk_index"] is not None for item in failed_transcriptions
+                            ):
+                                keep_input = (
+                                    input(
+                                        "\nKeep the converted/chunked audio so you can retry without reprocessing? (y/n)\n"
+                                    )
+                                    .strip()
+                                    .lower()
+                                )
+                                if keep_input == "y":
+                                    keep_chunks_for_retry = True
+                                    cleanup_on_exit = False
+                                    sys.stdout.write(
+                                        "\nChunk audio kept in reduced_files/. Run the same file again to resume before processing other files.\n"
+                                    )
+                                    sys.stdout.flush()
+
+                        else:
+                            sys.stdout.flush()
+
+                        if not keep_chunks_for_retry:
+                            cleanup_reduced_files()
+                            cleanup_on_exit = True
 
                     # Ask user if they want to continue
                     continue_input = (
@@ -614,7 +934,8 @@ def main():
     finally:
         sys.stdout.write("Exiting application...\n")
         sys.stdout.flush()
-        cleanup_reduced_files()  # Clean up before exiting
+        if cleanup_on_exit:
+            cleanup_reduced_files()  # Clean up before exiting
 
 
 if __name__ == "__main__":
