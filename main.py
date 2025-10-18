@@ -557,8 +557,23 @@ def whisper(file_path, last_timestamp_seconds, last_id, last_text):
                 if attempt == max_retries:
                     # Re-raise after last attempt; caller prints the error
                     raise
+                err_type = type(e).__name__
+                details = getattr(e, "message", "") or str(e)
+
+                if not details and getattr(e, "__cause__", None):
+                    details = str(e.__cause__)
+
+                response = getattr(e, "response", None)
+                if response is not None:
+                    status = getattr(response, "status_code", "unknown")
+                    body = getattr(response, "text", "")
+                    snippet = (body or "").strip().replace("\n", " ")
+                    if len(snippet) > 200:
+                        snippet = snippet[:200] + "..."
+                    details += f" [status={status}, body={snippet}]"
+
                 sys.stdout.write(
-                    f"\nConnection error contacting OpenAI (attempt {attempt}/{max_retries}): {e}\n"
+                    f"\n{err_type} contacting OpenAI (attempt {attempt}/{max_retries}): {details or 'No details'}\n"
                     f"Retrying in {int(delay_seconds)}s...\n"
                 )
                 sys.stdout.flush()
