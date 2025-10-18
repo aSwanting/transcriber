@@ -560,8 +560,14 @@ def whisper(file_path, last_timestamp_seconds, last_id, last_text):
                 err_type = type(e).__name__
                 details = getattr(e, "message", "") or str(e)
 
-                if not details and getattr(e, "__cause__", None):
-                    details = str(e.__cause__)
+                cause = getattr(e, "__cause__", None)
+                if cause is not None and not details:
+                    details = str(cause)
+                cause_chain = []
+                current = cause
+                while current is not None:
+                    cause_chain.append(f"{type(current).__name__}: {current}")
+                    current = getattr(current, "__cause__", None)
 
                 response = getattr(e, "response", None)
                 if response is not None:
@@ -574,6 +580,12 @@ def whisper(file_path, last_timestamp_seconds, last_id, last_text):
 
                 sys.stdout.write(
                     f"\n{err_type} contacting OpenAI (attempt {attempt}/{max_retries}): {details or 'No details'}\n"
+                )
+                if cause_chain:
+                    sys.stdout.write("Caused by:\n")
+                    for entry in cause_chain:
+                        sys.stdout.write(f"  - {entry}\n")
+                sys.stdout.write(
                     f"Retrying in {int(delay_seconds)}s...\n"
                 )
                 sys.stdout.flush()
